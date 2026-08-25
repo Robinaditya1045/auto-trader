@@ -94,26 +94,35 @@ pub async fn run(
             }
 
             _ = evaluate.tick() => {
-                // The engine is disabled by default; when off it costs one
-                // config read per cycle and nothing else.
-                let enabled = { engine.read().await.cfg.enabled };
-                if !enabled {
+                if !shared_domain::is_market_open() {
                     continue;
                 }
-                if !shared_domain::is_market_open() {
+
+                let indices = { engine.read().await.cfg.indices.clone() };
+
+                // Keep the index spot feeds subscribed. Without this the
+                // strategy has no underlying to analyse — the original engine
+                // only ever subscribed the option contracts it already held.
+                //
+                // Deliberately *outside* the `enabled` check below: bar history
+                // has to accumulate before the engine is armed, otherwise
+                // enabling it would also be the moment its warm-up starts from
+                // zero. Leaving it disabled for a session now builds the history
+                // that lets it be switched on already warm. Subscribing costs
+                // two feed slots and places no orders.
+                let spot_keys: Vec<String> = indices.iter().map(|i| i.spot_key.clone()).collect();
+                subscribe(&engine, &ws_tx, &prices, &spot_keys).await;
+
+                // Everything past this point is evaluation, which stays off
+                // until a human enables the engine.
+                let enabled = { engine.read().await.cfg.enabled };
+                if !enabled {
                     continue;
                 }
 
                 { engine.write().await.roll_session(); }
 
                 let cfg_now = { trading_cfg.read().await.clone() };
-                let indices = { engine.read().await.cfg.indices.clone() };
-
-                // Keep the spot feeds subscribed. Without this the strategy has
-                // no underlying to analyse — the original engine only ever
-                // subscribed the option contracts it already held.
-                let spot_keys: Vec<String> = indices.iter().map(|i| i.spot_key.clone()).collect();
-                subscribe(&engine, &ws_tx, &prices, &spot_keys).await;
 
                 let store_guard = scrip_store.read().await;
                 let Some(store) = store_guard.as_ref() else {
