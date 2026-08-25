@@ -16,3 +16,9 @@ backend/server/server-bin
 backend/server/server-latest
 
 .env
+
+# VSCode extension artifacts — Next.js snippet cheatsheets dropped into docs/.
+# Unrelated to this project (Vite/React, not Next.js); ignored so a regenerated
+# copy cannot slip into a commit.
+docs/javascript-snippets.md
+docs/typescript-snippets.md

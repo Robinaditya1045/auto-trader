@@ -24,6 +24,11 @@ pub async fn start_market_data_stream(
     initial_scrips: String,
     _channel_num: u32,
     prices: Arc<dashmap::DashMap<String, f64>>,
+    // Full-depth tick store, populated alongside `prices`. Strictly additive:
+    // `prices` keeps receiving exactly the same LTP writes it always did, so
+    // the live order path's view of the market is unchanged by this feed
+    // widening. Only the strategy engine reads `ticks`.
+    ticks: shared_domain::TickStore,
     mut rx: tokio::sync::mpsc::UnboundedReceiver<String>,
 ) {
     let mut active_scrips = std::collections::HashSet::new();
@@ -126,17 +131,26 @@ pub async fn start_market_data_stream(
 
             // Spawn reader for stdout
             let prices_clone = Arc::clone(&prices);
+            let ticks_clone = Arc::clone(&ticks);
             tokio::spawn(async move {
                 let mut reader = BufReader::new(stdout).lines();
                 while let Ok(Some(line)) = reader.next_line().await {
                     if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&line) {
                         if parsed["event"] == "data" {
                             if let Some(arr) = parsed["data"].as_array() {
+                                let now_ms = chrono::Utc::now().timestamp_millis();
                                 for item in arr {
                                     if let (Some(tk), Some(e)) = (item["tk"].as_str(), item["e"].as_str()) {
+                                        let key = format!("{}|{}", e.to_ascii_lowercase(), tk.trim());
+                                        // LTP map first, byte-for-byte the original
+                                        // behaviour — the live path depends on it.
                                         if let Some(ltp) = item["ltp"].as_f64().or_else(|| item["ltp"].as_str().and_then(|s| s.parse::<f64>().ok())) {
-                                            prices_clone.insert(format!("{}|{}", e.to_ascii_lowercase(), tk.trim()), ltp);
+                                            prices_clone.insert(key.clone(), ltp);
                                         }
+                                        // Then accumulate the full frame for the
+                                        // strategy engine. HSM sends deltas, so this
+                                        // merges rather than replaces.
+                                        shared_domain::apply_frame(&ticks_clone, &key, item, now_ms);
                                     }
                                 }
                             }
@@ -212,6 +226,7 @@ pub async fn start_market_data_stream(
                 close_deadline = None;
                 for scrip in active_scrips.iter() {
                     prices.remove(scrip);
+                    ticks.remove(scrip);
                 }
             }
         }

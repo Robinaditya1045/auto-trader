@@ -3,6 +3,9 @@ use std::collections::HashMap;
 use chrono::{DateTime, Duration as ChronoDuration, FixedOffset, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 
+pub mod market;
+pub use market::{apply_frame, new_tick_store, MarketTick, TickStore};
+
 /// Underlying index names this app treats as "index" options (vs. stock
 /// options, which fall back to `TradingConfig::other_lots`). Matched against
 /// `TradeSignal::instrument_name.to_uppercase()` with an *exact* match — do
@@ -203,6 +206,16 @@ pub struct TradeSignal {
     /// The exact raw message text received, for displaying in reports.
     #[serde(default)]
     pub raw_message: Option<String>,
+    /// Marks a signal that must **never** reach the live order path.
+    ///
+    /// Set by the autonomous strategy engine. The engine additionally refuses
+    /// to publish any signal at all while `TradingConfig::mode` is `"LIVE"`, so
+    /// this flag is a second, independent guard rather than the only one: if a
+    /// `paper_only` signal ever does reach `decide_live`, the live entry gate
+    /// abandons it instead of buying. Defaults to `false`, so every existing
+    /// Telegram/manual signal is unaffected.
+    #[serde(default)]
+    pub paper_only: bool,
 }
 
 // ===========================================================================

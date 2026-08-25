@@ -1218,6 +1218,16 @@ fn decide_live(
         TradeState::Closed => None,
 
         TradeState::WaitingForEntry => {
+            // Signals produced by the autonomous strategy engine are marked
+            // `paper_only` and must never buy with real money. The engine
+            // already refuses to publish anything outside PAPER mode, so
+            // reaching here means that guard was bypassed or broken — abandon
+            // the entry rather than trust it.
+            if pos.signal.paper_only {
+                return Some(LiveAction::AbandonEntry {
+                    reason: "PAPER_ONLY_SIGNAL_IN_LIVE".to_string(),
+                });
+            }
             if let Some(reason) = pos.force_exit.clone() {
                 return Some(LiveAction::AbandonEntry { reason });
             }
@@ -2378,6 +2388,87 @@ pub async fn start_position_monitor(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── LIVE entry gate: the paper_only guard ──────────────────────────── //
+
+    fn live_cfg() -> TradingConfig {
+        TradingConfig {
+            max_trade_amount_inr: 15_000.0,
+            index_lots: 1, other_lots: 1,
+            index_lots_by_symbol: Default::default(),
+            mode: "LIVE".into(),
+            brokerage_per_order: 20.0,
+            target_1_exit_pct: 50.0, target_2_exit_pct: 50.0,
+            entry_market_protection: 5.0,
+            dynamic_targeting: false,
+        }
+    }
+
+    /// A position waiting to enter, with a resolved order and a triggering LTP.
+    fn waiting_position(paper_only: bool) -> (MonitoredPosition, Arc<DashMap<String, f64>>) {
+        let key = "nse_fo|51386".to_string();
+        let ltp_map: Arc<DashMap<String, f64>> = Arc::new(DashMap::new());
+        // Above the 100.0 entry trigger, so the entry would fire.
+        ltp_map.insert(key.clone(), 120.0);
+
+        let pos = MonitoredPosition {
+            id: "p1".into(),
+            signal: TradeSignal {
+                instrument_name: "NIFTY".into(), strike: Some(24_000.0),
+                option_type: Some("CE".into()), expiry: None,
+                action: "BUY".into(), entry_condition: "ABOVE".into(), entry_price: 100.0,
+                targets: vec![130.0, 160.0], stop_loss: 70.0, source: "test".into(),
+                signal_id: None, raw_message: None, paper_only,
+            },
+            state: TradeState::WaitingForEntry,
+            current_sl: 70.0, next_dynamic_target: None, manual_sell_qty: None,
+            executed_qty: 0, avg_buy_price: 0.0, override_qty: None,
+            resolved_order: Some(shared_domain::OrderRequest {
+                after_market_order: shared_domain::AmoFlag::No,
+                disclosed_quantity: "0".into(),
+                exchange_segment: shared_domain::ExchangeSegment::NseFo,
+                market_protection: "0".into(),
+                product_code: shared_domain::ProductCode::Nrml,
+                portfolio_flag: "N".into(),
+                price: "0".into(),
+                order_type: shared_domain::OrderType::Market,
+                quantity: "75".into(),
+                validity: shared_domain::Validity::Day,
+                trigger_price: "0".into(),
+                trading_symbol: "NIFTY24000CE".into(),
+                transaction_type: shared_domain::TransactionType::Buy,
+            }),
+            ltp: None, ws_scrip_key: Some(key), force_exit: None, override_exit_price: None,
+            tick_size: 0.05, entry_order_id: None, sl_order_id: None, sl_order_qty: 0,
+            sl_order_trigger: 0.0, target_order_id: None, pending_exit_order_id: None,
+            pending_exit_qty: 0, pending_exit_reason: None, entry_cancel_sent: false,
+            exit_attempts: 0, live_halt: None,
+        };
+        (pos, ltp_map)
+    }
+
+    #[test]
+    fn a_paper_only_signal_is_never_bought_in_live_mode() {
+        let (pos, ltp_map) = waiting_position(true);
+        let action = decide_live(&pos, &ltp_map, &live_cfg(), false, false);
+        match action {
+            Some(LiveAction::AbandonEntry { reason }) => {
+                assert_eq!(reason, "PAPER_ONLY_SIGNAL_IN_LIVE");
+            }
+            other => panic!("a paper_only signal must never place a live entry, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_ordinary_signal_still_enters_normally() {
+        // The guard must not have changed behaviour for real signals.
+        let (pos, ltp_map) = waiting_position(false);
+        let action = decide_live(&pos, &ltp_map, &live_cfg(), false, false);
+        assert!(
+            matches!(action, Some(LiveAction::PlaceEntry { .. })),
+            "a normal triggered signal must still enter, got {action:?}"
+        );
+    }
 
     #[test]
     fn tick_rounding_stays_on_the_grid() {

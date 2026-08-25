@@ -6,6 +6,7 @@
 
 mod db;
 mod routes;
+mod strategy_task;
 
 use std::sync::Arc;
 
@@ -21,11 +22,10 @@ use axum::{
     extract::Request,
     http::{StatusCode, header},
     middleware::{self, Next},
-    response::IntoResponse,
 };
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use hmac::{Hmac, Mac};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use sha2::Sha256;
 
 type HmacSha256 = Hmac<Sha256>;
@@ -131,6 +131,9 @@ pub(crate) struct AppState {
     pub trading_cfg: Arc<RwLock<TradingConfig>>,
     /// Live price map shared with the position monitor.
     pub prices:      Arc<DashMap<String, f64>>,
+    /// Full-depth tick store shared with the strategy engine. Written by the
+    /// websocket reader alongside `prices`; the live order path does not read it.
+    pub ticks:       shared_domain::TickStore,
     /// Authenticated Kotak client (None until POST /api/auth/kotak).
     pub kotak:       Arc<Mutex<Option<kotak_client::KotakClient>>>,
     /// Telegram step-by-step auth manager.
@@ -147,6 +150,8 @@ pub(crate) struct AppState {
     pub ws_tx: Arc<tokio::sync::Mutex<Option<mpsc::UnboundedSender<String>>>>,
     /// Rate limit map for passkey auth attempts
     pub rate_limit_map: Arc<DashMap<String, RateLimitEntry>>,
+    /// Autonomous strategy engine handle (signal producer, PAPER mode only).
+    pub strategy: Arc<strategy_task::StrategyHandle>,
 }
 
 // ---------------------------------------------------------------------------
@@ -185,6 +190,10 @@ async fn main() {
 
     // 4. Shared state
     let prices: Arc<DashMap<String, f64>> = Arc::new(DashMap::new());
+    // Full-depth tick store. Populated alongside `prices` by the websocket
+    // reader and read only by the strategy engine — the live order path
+    // continues to use `prices` exactly as before.
+    let ticks: shared_domain::TickStore = shared_domain::new_tick_store();
     let restored_positions = db::load_open_positions(&pool).await;
     let positions = Arc::new(RwLock::new(restored_positions));
     let (signal_tx, signal_rx) = broadcast::channel::<TradeSignal>(100);
@@ -260,7 +269,8 @@ async fn main() {
             // Start WebSocket
             let (initial_ws_tx, ws_rx) = mpsc::unbounded_channel::<String>();
             let ws_handle = tokio::spawn(kotak_client::start_market_data_stream(
-                session.auth_token, session.sid, ws_scrips, 1, Arc::clone(&prices), ws_rx,
+                session.auth_token, session.sid, ws_scrips, 1,
+                Arc::clone(&prices), Arc::clone(&ticks), ws_rx,
             ));
             *ws_task.lock().await = Some(ws_handle);
             
@@ -301,6 +311,37 @@ async fn main() {
         Arc::clone(&scrip_store),
         Arc::clone(&ws_tx),
         Arc::clone(&kotak_client_opt),
+    ));
+
+    // 8b. Autonomous strategy engine.
+    //
+    // A signal *producer* only: it publishes onto the same channel the Telegram
+    // ingester uses and never touches the broker. Its own gate restricts
+    // publishing to PAPER mode, and it ships disabled until switched on from
+    // the dashboard.
+    let strategy_cfg = db::load_strategy_config(&pool).await;
+    tracing::info!(
+        enabled = strategy_cfg.enabled,
+        indices = strategy_cfg.indices.len(),
+        "Strategy engine loaded (publishes in PAPER mode only)"
+    );
+    let strategy_engine = Arc::new(RwLock::new(
+        trading_engine::StrategyEngine::new(strategy_cfg),
+    ));
+    let strategy_handle = Arc::new(strategy_task::StrategyHandle {
+        engine: Arc::clone(&strategy_engine),
+    });
+    tokio::spawn(strategy_task::run(
+        Arc::clone(&strategy_engine),
+        Arc::clone(&ticks),
+        Arc::clone(&prices),
+        Arc::clone(&scrip_store),
+        Arc::clone(&positions),
+        Arc::clone(&trading_cfg),
+        signal_tx.clone(),
+        Arc::clone(&ws_tx),
+        write_tx.clone(),
+        pool.clone(),
     ));
 
     // 9. Daily Scrip Master refresh — runs at 09:10 IST every trading day
@@ -466,6 +507,7 @@ async fn main() {
         db_tx: write_tx.clone(),
         trading_cfg,
         prices,
+        ticks,
         kotak: kotak_client_opt,
         telegram: Arc::new(Mutex::new(telegram_ingester::TelegramManager::new())),
         positions,
@@ -474,6 +516,7 @@ async fn main() {
         ws_task,
         ws_tx,
         rate_limit_map: Arc::new(DashMap::new()),
+        strategy: strategy_handle,
     };
 
     let app = Router::new()
@@ -513,6 +556,12 @@ async fn main() {
         .route("/api/auth/telegram/start",          post(routes::telegram_start_handler))
         .route("/api/auth/telegram/disconnect",     axum::routing::delete(routes::disconnect_telegram))
         .route("/api/auth/verify-passkey",          post(routes::verify_passkey_handler))
+        .route("/api/strategy",                     get(routes::strategy_state_handler))
+        .route("/api/strategy/decisions",           get(routes::strategy_decisions_handler))
+        .route("/api/strategy/config",              get(routes::get_strategy_config_handler)
+                                                    .post(routes::post_strategy_config_handler))
+        .route("/api/strategy/halt",                post(routes::post_strategy_halt_handler))
+        .route("/api/strategy/resume",              post(routes::post_strategy_resume_handler))
         .fallback_service(ServeDir::new("../frontend/dist"))
         .layer(middleware::from_fn(auth_middleware))
         .with_state(state)

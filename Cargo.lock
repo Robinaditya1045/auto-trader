@@ -1281,6 +1281,7 @@ name = "kotak_client"
 version = "0.1.0"
 dependencies = [
  "base64",
+ "chrono",
  "dashmap",
  "flate2",
  "futures-util",
@@ -2388,7 +2389,9 @@ name = "shared_domain"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "dashmap",
  "serde",
+ "serde_json",
  "uuid",
 ]
 

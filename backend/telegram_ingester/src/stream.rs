@@ -96,6 +96,7 @@ pub(crate) async fn run_event_loop(
                     source: "telegram_reply".to_string(),
                     signal_id: Some(reply_to_id.to_string()),
                     raw_message: Some(text.to_owned()),
+                    paper_only: false,
                 };
                 tracing::info!(new_sl, "Reply parsed as SL update — broadcasting");
                 if tx.send(signal).is_err() {
@@ -116,6 +117,7 @@ pub(crate) async fn run_event_loop(
                     source: "telegram_reply".to_string(),
                     signal_id: Some(reply_to_id.to_string()),
                     raw_message: Some(text.to_owned()),
+                    paper_only: false,
                 };
                 tracing::info!(exit_price, "Reply parsed as EXIT_AT — broadcasting");
                 if tx.send(signal).is_err() {

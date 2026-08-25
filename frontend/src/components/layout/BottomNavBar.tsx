@@ -1,8 +1,8 @@
 import {
   BarChart2,
+  Brain,
   LayoutDashboard,
   Settings,
-  TrendingUp,
   Wallet,
 } from 'lucide-react';
 import type { ScreenId } from '../../types';
@@ -45,11 +45,11 @@ export function BottomNavBar({
         <span className="text-[10px] mt-1 font-medium">Analytics</span>
       </div>
       <div
-        onClick={() => onSelectScreen('portfolio')}
-        className={itemClass(activeScreen === 'portfolio')}
+        onClick={() => onSelectScreen('strategy')}
+        className={itemClass(activeScreen === 'strategy')}
       >
-        <TrendingUp size={20} className={activeScreen === 'portfolio' ? 'scale-110 transition-transform' : ''} />
-        <span className="text-[10px] mt-1 font-medium">Portfolio</span>
+        <Brain size={20} className={activeScreen === 'strategy' ? 'scale-110 transition-transform' : ''} />
+        <span className="text-[10px] mt-1 font-medium">Strategy</span>
       </div>
       <div
         onClick={() => onSelectScreen('settings')}

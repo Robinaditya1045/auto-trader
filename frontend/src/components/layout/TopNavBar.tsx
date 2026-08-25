@@ -14,6 +14,7 @@ export function TopNavBar({
     positions: 'Active Positions & Signals',
     analytics: 'Trade Analytics & Order Flow Deep Dive',
     portfolio: 'Portfolio Performance & Reports',
+    strategy: 'Autonomous Strategy Engine',
     settings: 'Configurations & System Settings',
   };
 

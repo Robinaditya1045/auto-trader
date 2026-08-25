@@ -91,6 +91,7 @@ pub async fn kotak_login_handler(
         let new_handle = tokio::spawn(kotak_client::start_market_data_stream(
             auth.to_owned(), sid.to_owned(), scrips, 1,
             Arc::clone(&state.prices),
+            Arc::clone(&state.ticks),
             ws_rx,
         ));
         *ws_guard = Some(new_handle);
@@ -141,7 +142,7 @@ pub async fn kotak_login_handler(
 
             // Clone the client out of the mutex for the duration of the fetch.
             let client_opt = bg_state.kotak.lock().await.clone();
-            let mut bg_client = match client_opt {
+            let bg_client = match client_opt {
                 Some(c) => c,
                 None => {
                     let err = r#"{"event":"SCRIP_FETCH_ERROR","message":"Kotak client disappeared before scrip fetch"}"#;

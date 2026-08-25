@@ -41,7 +41,7 @@ pub async fn verify_passkey_handler(
 
     // 1. Rate-limit check (5 attempts / 15 minutes)
     let window_duration = std::time::Duration::from_secs(15 * 60);
-    let mut current_attempts = 0;
+    let current_attempts;
     
     if let Some(mut entry) = state.rate_limit_map.get_mut(&ip) {
         if entry.window_start.elapsed() > window_duration {

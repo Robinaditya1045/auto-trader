@@ -131,7 +131,215 @@ pub async fn init_db(db_url: &str) -> SqlitePool {
         )",
     ).execute(&pool).await.unwrap();
 
+    // ── Strategy engine tables ───────────────────────────────────────────
+    // Both are additive `CREATE TABLE IF NOT EXISTS`, so an existing trades.db
+    // gains them in place. No migration wipes any data and no reset is needed.
+
+    // Minute bars, persisted so indicators survive a restart and each session
+    // after the first starts warm. Kotak publishes no historical candle API, so
+    // this table is the only price history the strategy will ever have.
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS strategy_candles (
+            scrip_key TEXT NOT NULL,
+            minute INTEGER NOT NULL,
+            open REAL NOT NULL, high REAL NOT NULL, low REAL NOT NULL, close REAL NOT NULL,
+            volume REAL NOT NULL DEFAULT 0.0,
+            ticks INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (scrip_key, minute)
+        )",
+    ).execute(&pool).await.unwrap();
+
+    // Decision log — one row per evaluation that produced a signal or an
+    // explicit refusal, so the debate can be audited after the fact.
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS strategy_decisions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            underlying TEXT NOT NULL,
+            regime TEXT NOT NULL,
+            stance TEXT NOT NULL,
+            conviction REAL NOT NULL,
+            actionable INTEGER NOT NULL DEFAULT 0,
+            published INTEGER NOT NULL DEFAULT 0,
+            outcome TEXT NOT NULL,
+            detail_json TEXT NOT NULL,
+            timestamp DATETIME NOT NULL
+        )",
+    ).execute(&pool).await.unwrap();
+
+    // Strategy configuration, stored as JSON so tuning a threshold never needs
+    // a schema migration.
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS strategy_config (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            json TEXT NOT NULL,
+            updated_at DATETIME NOT NULL
+        )",
+    ).execute(&pool).await.unwrap();
+
     pool
+}
+
+// ---------------------------------------------------------------------------
+// Strategy persistence
+// ---------------------------------------------------------------------------
+
+#[derive(sqlx::FromRow)]
+struct CandleRow {
+    minute: i64,
+    open: f64,
+    high: f64,
+    low: f64,
+    close: f64,
+    volume: f64,
+    ticks: i64,
+}
+
+/// Load the most recent `limit` bars for one instrument, oldest first.
+pub async fn load_candles(
+    pool: &SqlitePool,
+    scrip_key: &str,
+    limit: i64,
+) -> Vec<trading_engine::strategy::Candle> {
+    // Newest-first with LIMIT, then reversed — the series expects ascending
+    // order but we want the *latest* window, not the oldest.
+    let rows = sqlx::query_as::<_, CandleRow>(
+        "SELECT minute, open, high, low, close, volume, ticks
+         FROM strategy_candles WHERE scrip_key = ? ORDER BY minute DESC LIMIT ?",
+    )
+    .bind(scrip_key)
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
+
+    rows.into_iter()
+        .rev()
+        .map(|r| trading_engine::strategy::Candle {
+            minute: r.minute,
+            open: r.open, high: r.high, low: r.low, close: r.close,
+            volume: r.volume,
+            ticks: r.ticks.clamp(0, u32::MAX as i64) as u32,
+        })
+        .collect()
+}
+
+/// Distinct instruments that already have persisted history.
+pub async fn candle_keys(pool: &SqlitePool) -> Vec<String> {
+    sqlx::query_scalar::<_, String>("SELECT DISTINCT scrip_key FROM strategy_candles")
+        .fetch_all(pool)
+        .await
+        .unwrap_or_default()
+}
+
+/// Persist one closed bar. Idempotent — replaying the same minute overwrites
+/// rather than duplicating, which matters after a restart mid-minute.
+pub async fn save_candle(pool: &SqlitePool, scrip_key: &str, c: &trading_engine::strategy::Candle) {
+    let _ = sqlx::query(
+        "INSERT INTO strategy_candles (scrip_key, minute, open, high, low, close, volume, ticks)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(scrip_key, minute) DO UPDATE SET
+            open = excluded.open, high = excluded.high, low = excluded.low,
+            close = excluded.close, volume = excluded.volume, ticks = excluded.ticks",
+    )
+    .bind(scrip_key)
+    .bind(c.minute)
+    .bind(c.open).bind(c.high).bind(c.low).bind(c.close)
+    .bind(c.volume)
+    .bind(c.ticks as i64)
+    .execute(pool)
+    .await;
+}
+
+/// Drop bars older than `keep_days`, so the table cannot grow without bound.
+pub async fn prune_candles(pool: &SqlitePool, keep_days: i64) {
+    let cutoff_minute = (chrono::Utc::now().timestamp() / 60) - keep_days * 24 * 60;
+    let _ = sqlx::query("DELETE FROM strategy_candles WHERE minute < ?")
+        .bind(cutoff_minute)
+        .execute(pool)
+        .await;
+}
+
+/// Append one decision to the audit log.
+pub async fn save_decision(
+    pool: &SqlitePool,
+    d: &trading_engine::strategy::engine::Decision,
+    published: bool,
+) {
+    let detail = serde_json::to_string(d).unwrap_or_else(|_| "{}".into());
+    let _ = sqlx::query(
+        "INSERT INTO strategy_decisions
+            (underlying, regime, stance, conviction, actionable, published, outcome, detail_json, timestamp)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(&d.underlying)
+    .bind(d.regime.regime.as_str())
+    .bind(d.debate.stance.as_str())
+    .bind(d.debate.conviction)
+    .bind(d.debate.actionable as i32)
+    .bind(published as i32)
+    .bind(&d.outcome)
+    .bind(detail)
+    .bind(current_ist_timestamp_string())
+    .execute(pool)
+    .await;
+}
+
+/// Recent decisions, newest first, as raw JSON detail for the dashboard.
+pub async fn load_recent_decisions(pool: &SqlitePool, limit: i64) -> Vec<serde_json::Value> {
+    sqlx::query_scalar::<_, String>(
+        "SELECT detail_json FROM strategy_decisions ORDER BY id DESC LIMIT ?",
+    )
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default()
+    .into_iter()
+    .filter_map(|s| serde_json::from_str(&s).ok())
+    .collect()
+}
+
+/// Load the persisted strategy configuration.
+///
+/// Falls back to defaults when absent **or invalid** — a config that fails
+/// validation is treated as no config at all, since defaults are disabled and
+/// therefore safe, while a half-parsed one is not.
+pub async fn load_strategy_config(pool: &SqlitePool) -> trading_engine::StrategyConfig {
+    let stored = sqlx::query_scalar::<_, String>("SELECT json FROM strategy_config WHERE id = 1")
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten();
+
+    match stored.as_deref().map(serde_json::from_str::<trading_engine::StrategyConfig>) {
+        Some(Ok(cfg)) => match cfg.validate() {
+            Ok(()) => cfg,
+            Err(e) => {
+                tracing::error!(error = %e, "stored strategy config is invalid — falling back to safe defaults");
+                trading_engine::StrategyConfig::default()
+            }
+        },
+        Some(Err(e)) => {
+            tracing::error!(error = %e, "stored strategy config could not be parsed — falling back to safe defaults");
+            trading_engine::StrategyConfig::default()
+        }
+        None => trading_engine::StrategyConfig::default(),
+    }
+}
+
+/// Persist the strategy configuration.
+pub async fn save_strategy_config(pool: &SqlitePool, cfg: &trading_engine::StrategyConfig) -> Result<(), String> {
+    cfg.validate()?;
+    let json = serde_json::to_string(cfg).map_err(|e| e.to_string())?;
+    sqlx::query(
+        "INSERT INTO strategy_config (id, json, updated_at) VALUES (1, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET json = excluded.json, updated_at = excluded.updated_at",
+    )
+    .bind(json)
+    .bind(current_ist_timestamp_string())
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -204,6 +412,9 @@ pub async fn load_open_positions(pool: &SqlitePool) -> Vec<MonitoredPosition> {
         .unwrap_or_default()
 }
 
+/// Mirrors the `kotak_session` row. `updated_at` is unused by the restore
+/// path but kept so the struct matches the table it is selected from.
+#[allow(dead_code)]
 pub struct KotakSessionRow {
     pub access_token: String,
     pub auth_token: String,

@@ -22,6 +22,7 @@ import { HealthPage } from './components/HealthPage';
 // Screens
 import { TradeAnalyticsScreen } from './screens/TradeAnalyticsScreen';
 import { PortfolioPerformanceScreen } from './screens/PortfolioPerformanceScreen';
+import { StrategyScreen } from './screens/StrategyScreen';
 
 export default function App() {
   const [logHeight, setLogHeight] = useState(220);
@@ -36,6 +37,7 @@ export default function App() {
       if (p.startsWith('/reports') || p.startsWith('/portfolio')) return 'portfolio';
       if (p.startsWith('/health') || p.startsWith('/settings')) return 'settings';
       if (p.startsWith('/analytics')) return 'analytics';
+      if (p.startsWith('/strategy')) return 'strategy';
       if (p.startsWith('/positions')) return 'positions';
     }
     return 'dashboard';
@@ -57,6 +59,7 @@ export default function App() {
         dashboard: '/',
         positions: '/positions',
         analytics: '/analytics',
+        strategy: '/strategy',
         portfolio: '/portfolio',
         settings: '/settings',
       };
@@ -149,6 +152,10 @@ export default function App() {
 
           {activeScreen === 'portfolio' && (
             <PortfolioPerformanceScreen serverBase={serverBase} />
+          )}
+
+          {activeScreen === 'strategy' && (
+            <StrategyScreen serverBase={serverBase} />
           )}
 
           {activeScreen === 'settings' && (

@@ -6,6 +6,7 @@ pub mod auth_passkey;
 pub mod health;
 
 pub mod positions;
+pub mod strategy;
 
 pub use portfolio::{webhook_handler, sse_logs_handler, portfolio_handler, logs_history_handler};
 pub use positions::{positions_handler, delete_position_handler, patch_position_handler, close_position_handler, sell_position_handler, reconcile_preview_handler, reconcile_apply_handler, prices_handler, scrip_search_handler, scrip_download_handler};
@@ -18,3 +19,8 @@ pub use auth_telegram::{
 };
 pub use health::health_handler;
 pub use auth_passkey::verify_passkey_handler;
+pub use strategy::{
+    strategy_state_handler, strategy_decisions_handler,
+    get_strategy_config_handler, post_strategy_config_handler,
+    post_strategy_halt_handler, post_strategy_resume_handler,
+};

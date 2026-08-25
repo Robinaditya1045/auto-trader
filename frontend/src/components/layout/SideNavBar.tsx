@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import {
   BarChart2,
+  Brain,
   LayoutDashboard,
   PanelLeftClose,
   PanelLeftOpen,
@@ -122,6 +123,14 @@ export function SideNavBar({
         >
           <BarChart2 size={isCollapsed ? 20 : 18} className="shrink-0" />
           {!isCollapsed && <span>Analytics</span>}
+        </div>
+        <div
+          onClick={() => onSelectScreen('strategy')}
+          title="Strategy Engine"
+          className={itemClass(activeScreen === 'strategy')}
+        >
+          <Brain size={isCollapsed ? 20 : 18} className="shrink-0" />
+          {!isCollapsed && <span>Strategy</span>}
         </div>
         <div
           onClick={() => onSelectScreen('portfolio')}
