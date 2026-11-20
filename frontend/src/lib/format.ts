@@ -11,6 +11,13 @@ export function fmt(n: number) {
   }).format(n);
 }
 
+/** A signed rupee amount with a real minus sign: +₹1,147.50 · −₹399.00. */
+export function fmtInrSigned(n: number) {
+  if (n > 0) return `+₹${fmt(n)}`;
+  if (n < 0) return `\u2212₹${fmt(-n)}`;
+  return `₹${fmt(0)}`;
+}
+
 export function totalCharges(t: PaperTrade) {
   return t.brokerage + t.stt_charge + t.sebi_fee +
     t.stamp_duty + t.transaction_charge + t.gst;

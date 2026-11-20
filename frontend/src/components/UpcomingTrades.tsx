@@ -1,10 +1,46 @@
 import { useCallback, useEffect, useState } from 'react';
-import { Info } from 'lucide-react';
+import { CheckCircle2, Clock, Info, XCircle } from 'lucide-react';
 import type { MonitoredPosition } from '../types';
 import { apiFetch } from '../lib/api';
-import { fmt } from '../lib/format';
+import { fmt, fmtInrSigned } from '../lib/format';
+import { useIsPhone } from '../hooks/useIsPhone';
 import { QtyInput } from './QtyInput';
 import { SyncWithKotakButton } from './SyncWithKotakButton';
+import { ClosePositionSheet, SellQtySheet, exitInFlight, type ActionResult } from './PositionSheets';
+
+async function errorText(res: Response): Promise<string> {
+  const err = await res.json().catch(() => null);
+  return err?.error ?? `HTTP ${res.status}`;
+}
+
+const NOT_REACHED = 'Could not reach the server. Check the position before trying again.';
+
+/** The outcome of the last action on a position, under its buttons. */
+function Notice({ result }: { result: ActionResult | undefined }) {
+  if (!result) return null;
+  const { cls, Icon } = {
+    done:      { cls: 'text-secondary', Icon: CheckCircle2 },
+    requested: { cls: 'text-primary', Icon: Clock },
+    error:     { cls: 'text-error', Icon: XCircle },
+  }[result.kind];
+  return (
+    <p role="status" className={`flex items-start gap-1.5 text-xs font-medium text-left ${cls}`}>
+      <Icon size={14} className="shrink-0 mt-px" />
+      <span>{result.message}</span>
+    </p>
+  );
+}
+
+/** An exit already on its way: the buttons are locked until it settles. */
+function InFlight({ text }: { text: string | null }) {
+  if (!text) return null;
+  return (
+    <p className="flex items-start gap-1.5 text-xs font-semibold text-primary bg-primary/10 rounded-lg px-2.5 py-2">
+      <Clock size={14} className="shrink-0 mt-px" />
+      <span>{text}</span>
+    </p>
+  );
+}
 
 // The static `signal.targets` list goes stale the moment a dynamic-targeting
 // runner extends past it — `next_dynamic_target` is the real rung the engine
@@ -29,11 +65,23 @@ function stateLabel(p: MonitoredPosition): string {
   return p.state;
 }
 
-export function UpcomingTrades({ serverBase }: { serverBase: string }) {
+export function UpcomingTrades({ serverBase, mode }: { serverBase: string; mode?: string }) {
   const [positions, setPositions] = useState<MonitoredPosition[]>([]);
   const [openTooltip, setOpenTooltip] = useState<string | null>(null);
   const [closingId, setClosingId] = useState<string | null>(null);
   const [sellingId, setSellingId] = useState<string | null>(null);
+  // The sheet keeps a snapshot of its position: a PAPER close removes the row,
+  // and the sheet still has to show what happened.
+  const [sheet, setSheet] = useState<{ kind: 'sell' | 'close'; p: MonitoredPosition } | null>(null);
+  const [notices, setNotices] = useState<Record<string, ActionResult>>({});
+  const isPhone = useIsPhone();
+
+  const notify = (id: string, r: ActionResult | null) =>
+    setNotices((prev) => {
+      const next = { ...prev };
+      if (r) next[id] = r; else delete next[id];
+      return next;
+    });
 
   const load = useCallback(() => {
     apiFetch(serverBase, '/api/positions')
@@ -49,18 +97,19 @@ export function UpcomingTrades({ serverBase }: { serverBase: string }) {
   }, [load]);
 
   async function cancelTrade(id: string) {
+    notify(id, null);
     try {
       const res = await apiFetch(serverBase, `/api/positions/${id}`, { method: 'DELETE' });
       if (!res.ok) {
         // In LIVE the server refuses to forget a position that is still open at
         // the broker — leave the row in place so it stays visible.
-        const err = await res.json().catch(() => null);
-        console.error(err?.error ?? 'Failed to cancel trade');
+        notify(id, { kind: 'error', message: `Cancel failed: ${await errorText(res)}` });
         return;
       }
       setPositions(prev => prev.filter(p => p.id !== id));
     } catch (e) {
       console.error(e);
+      notify(id, { kind: 'error', message: NOT_REACHED });
     }
   }
 
@@ -77,64 +126,99 @@ export function UpcomingTrades({ serverBase }: { serverBase: string }) {
     }
   }
 
-  async function closeOngoingTrade(id: string) {
+  // Close the whole position at market. The request is the same one the button
+  // always sent; what is new is that its outcome is reported, not just logged.
+  async function closeOngoingTrade(id: string): Promise<ActionResult> {
+    if (closingId) return { kind: 'error', message: 'Another close is already being sent.' };
+    let result: ActionResult;
     try {
       setClosingId(id);
+      notify(id, null);
       const res = await apiFetch(serverBase, `/api/positions/${id}/close`, { method: 'POST' });
       if (!res.ok) {
-        const err = await res.json().catch(() => null);
-        console.error(err?.error ?? 'Failed to close position');
-        return;
+        result = { kind: 'error', message: `Close failed: ${await errorText(res)}` };
+      } else if (res.status === 202) {
+        // 202 means LIVE: the exit was handed to the engine and is not filled yet.
+        // Keep the row until the poll shows the broker actually sold.
+        const body = await res.json().catch(() => null);
+        result = {
+          kind: 'requested',
+          message: `Exit of ${body?.qty ?? 'the whole holding'} handed to the engine. It sells at market on its next tick; the position stays here until Kotak fills it.`,
+        };
+        load();
+      } else {
+        const body = await res.json().catch(() => null);
+        result = {
+          kind: 'done',
+          message: body?.exit_price != null
+            ? `Closed ${body.qty} at ₹${fmt(body.exit_price)}${body.pnl != null ? ` · P&L ${fmtInrSigned(body.pnl)}` : ''}.`
+            : 'Closed.',
+        };
+        setPositions((prev) => prev.filter((p) => p.id !== id));
       }
-      // 202 means LIVE: the exit was handed to the engine and is not filled yet.
-      // Keep the row until the poll shows the broker actually sold.
-      if (res.status === 202) return;
-      setPositions((prev) => prev.filter((p) => p.id !== id));
     } catch (e) {
       console.error(e);
+      result = { kind: 'error', message: NOT_REACHED };
     } finally {
       setClosingId(null);
     }
+    notify(id, result);
+    return result;
   }
 
-  async function sellQty(id: string, held: number) {
-    const input = window.prompt(`Quantity to sell at market (of ${held} held):`, String(held));
-    if (input === null) return;
-    const qty = parseInt(input, 10);
-    if (!Number.isFinite(qty) || qty <= 0) {
-      window.alert('Enter a whole number greater than 0.');
-      return;
-    }
+  // Sell part of a position at market: the same `{ qty }` request the old
+  // prompt sent. The sheet only offers quantities the server accepts.
+  async function sellQty(id: string, qty: number): Promise<ActionResult> {
+    if (sellingId) return { kind: 'error', message: 'Another sell is already being sent.' };
+    let result: ActionResult;
     try {
       setSellingId(id);
+      notify(id, null);
       const res = await apiFetch(serverBase, `/api/positions/${id}/sell`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ qty }),
       });
       if (!res.ok) {
-        const err = await res.json().catch(() => null);
-        window.alert(err?.error ?? 'Failed to sell quantity');
-        return;
+        result = { kind: 'error', message: `Sell failed: ${await errorText(res)}` };
+      } else if (res.status === 202) {
+        // 202 means LIVE: handed to the engine, not filled yet — the poll picks
+        // up the reduced executed_qty once it settles.
+        result = {
+          kind: 'requested',
+          message: `Sell of ${qty} handed to the engine. It places the market order at Kotak on its next tick; the quantity here drops when it fills.`,
+        };
+        load();
+      } else {
+        const body = await res.json().catch(() => null);
+        setPositions((prev) =>
+          prev.map((p) => (p.id === id ? { ...p, executed_qty: body?.remaining ?? p.executed_qty } : p))
+        );
+        result = {
+          kind: 'done',
+          message: `Sold ${qty}${body?.exit_price != null ? ` at ₹${fmt(body.exit_price)}` : ''}${body?.remaining != null ? ` · ${body.remaining} left` : ''}.`,
+        };
       }
-      // 202 means LIVE: handed to the engine, not filled yet — the poll picks
-      // up the reduced executed_qty once it settles.
-      if (res.status === 202) return;
-      const body = await res.json().catch(() => null);
-      setPositions((prev) =>
-        prev.map((p) => (p.id === id ? { ...p, executed_qty: body?.remaining ?? p.executed_qty } : p))
-      );
     } catch (e) {
       console.error(e);
+      result = { kind: 'error', message: NOT_REACHED };
     } finally {
       setSellingId(null);
     }
+    notify(id, result);
+    return result;
+  }
+
+  // Phone: Close asks first, in a sheet. Desktop: one click, as before.
+  function onClose(p: MonitoredPosition) {
+    if (isPhone) setSheet({ kind: 'close', p });
+    else void closeOngoingTrade(p.id);
   }
 
   const waiting = positions.filter((p) => p.state === 'WaitingForEntry');
   const active = positions.filter((p) => p.state === 'Active' || p.state === 'Target1Hit');
 
-  if (waiting.length === 0 && active.length === 0) return null;
+  if (waiting.length === 0 && active.length === 0 && !sheet) return null;
 
   return (
     <div className="bg-surface-container-lowest border-b border-outline-variant shrink-0">
@@ -213,6 +297,7 @@ export function UpcomingTrades({ serverBase }: { serverBase: string }) {
                       <button onClick={() => cancelTrade(p.id)} className="px-2.5 py-1 bg-error-container hover:bg-error text-on-error-container hover:text-on-error rounded text-xs transition-colors font-medium">
                         Cancel
                       </button>
+                      <div className="mt-1 flex justify-end"><Notice result={notices[p.id]} /></div>
                     </td>
                   </tr>
                 ))}
@@ -254,13 +339,14 @@ export function UpcomingTrades({ serverBase }: { serverBase: string }) {
                   <QtyInput initialQty={p.override_qty} id={p.id} defaultQty={p.resolved_order?.quantity} onUpdate={updateQty} />
                 </div>
 
-                <div className="pt-1">
+                <div className="pt-1 space-y-2">
                   <button
                     onClick={() => cancelTrade(p.id)}
-                    className="w-full py-2 rounded-lg bg-error-container hover:bg-error text-on-error-container hover:text-on-error font-semibold text-xs transition-colors flex items-center justify-center"
+                    className="w-full h-11 rounded-lg bg-error-container hover:bg-error text-on-error-container hover:text-on-error font-semibold text-sm transition-colors flex items-center justify-center"
                   >
                     Cancel Order
                   </button>
+                  <Notice result={notices[p.id]} />
                 </div>
               </div>
             ))}
@@ -295,6 +381,7 @@ export function UpcomingTrades({ serverBase }: { serverBase: string }) {
                 {active.map((p) => {
                   const hasLtp = p.ltp !== undefined && p.ltp !== null;
                   const pnl = hasLtp ? (p.ltp! - p.avg_buy_price) * p.executed_qty : null;
+                  const flight = exitInFlight(p);
                   return (
                     <tr key={p.id} className="border-b border-outline-variant hover:bg-surface-container/30 transition-colors">
                       <td className="px-3 py-2.5 font-bold text-on-surface relative">
@@ -347,28 +434,34 @@ export function UpcomingTrades({ serverBase }: { serverBase: string }) {
                         {pnl === null ? (
                           <span className="text-on-surface-variant">—</span>
                         ) : (
-                          <span className={`font-bold ${pnl >= 0 ? 'text-secondary' : 'text-error'}`}>
-                            {pnl >= 0 ? '+' : ''}₹{fmt(pnl)}
+                          <span className={`font-bold tabular-nums ${pnl >= 0 ? 'text-secondary' : 'text-error'}`}>
+                            {fmtInrSigned(pnl)}
                           </span>
                         )}
                       </td>
                       <td className="px-3 py-2.5 text-right">
                         <div className="flex items-center justify-end gap-1.5">
                           <button
-                            onClick={() => sellQty(p.id, p.executed_qty)}
-                            disabled={sellingId === p.id}
+                            onClick={() => setSheet({ kind: 'sell', p })}
+                            disabled={sellingId === p.id || closingId === p.id || flight != null}
                             className="px-2.5 py-1 bg-surface-container hover:bg-surface-container-high text-on-surface rounded text-xs transition-colors font-medium disabled:opacity-50"
                           >
                             {sellingId === p.id ? 'Selling…' : 'Sell Qty'}
                           </button>
                           <button
-                            onClick={() => closeOngoingTrade(p.id)}
-                            disabled={closingId === p.id}
+                            onClick={() => onClose(p)}
+                            disabled={closingId === p.id || sellingId === p.id || flight != null}
                             className="px-2.5 py-1 bg-tertiary-container hover:bg-tertiary text-on-tertiary-container hover:text-on-tertiary rounded text-xs transition-colors font-medium disabled:opacity-50"
                           >
                             {closingId === p.id ? 'Closing…' : 'Close'}
                           </button>
                         </div>
+                        {(flight || notices[p.id]) && (
+                          <div className="mt-1.5 ml-auto max-w-72 space-y-1">
+                            <InFlight text={flight} />
+                            <Notice result={notices[p.id]} />
+                          </div>
+                        )}
                       </td>
                     </tr>
                   );
@@ -382,6 +475,7 @@ export function UpcomingTrades({ serverBase }: { serverBase: string }) {
             {active.map((p) => {
               const hasLtp = p.ltp !== undefined && p.ltp !== null;
               const pnl = hasLtp ? (p.ltp! - p.avg_buy_price) * p.executed_qty : null;
+              const flight = exitInFlight(p);
               return (
                 <div key={p.id} className="bg-surface rounded-xl border border-outline-variant p-3.5 shadow-sm space-y-3">
                   <div className="flex items-center justify-between">
@@ -414,37 +508,58 @@ export function UpcomingTrades({ serverBase }: { serverBase: string }) {
                   </div>
 
                   <div className="flex items-center justify-between pt-1 border-t border-outline-variant/40">
-                    <div className="text-xs font-semibold text-on-surface-variant">Unrealized P&amp;L:</div>
+                    <div className="text-xs font-semibold text-on-surface-variant">Unrealized P&amp;L <span className="font-normal">since entry</span></div>
                     {pnl === null ? (
                       <span className="text-on-surface-variant font-mono-code">—</span>
                     ) : (
-                      <span className={`text-base font-bold font-mono-code ${pnl >= 0 ? 'text-secondary' : 'text-error'}`}>
-                        {pnl >= 0 ? '+' : ''}₹{fmt(pnl)}
+                      <span className={`text-base font-bold font-mono-code tabular-nums ${pnl >= 0 ? 'text-secondary' : 'text-error'}`}>
+                        {fmtInrSigned(pnl)}
                       </span>
                     )}
                   </div>
 
+                  <InFlight text={flight} />
                   <div className="pt-1 flex items-center gap-2">
                     <button
-                      onClick={() => sellQty(p.id, p.executed_qty)}
-                      disabled={sellingId === p.id}
-                      className="flex-1 py-2 bg-surface-container hover:bg-surface-container-high text-on-surface rounded-lg text-xs font-bold transition-colors disabled:opacity-50 flex items-center justify-center"
+                      onClick={() => setSheet({ kind: 'sell', p })}
+                      disabled={sellingId === p.id || closingId === p.id || flight != null}
+                      className="flex-1 h-11 bg-surface-container hover:bg-surface-container-high text-on-surface rounded-lg text-sm font-bold transition-colors disabled:opacity-50 flex items-center justify-center"
                     >
                       {sellingId === p.id ? 'Selling…' : 'Sell Qty'}
                     </button>
                     <button
-                      onClick={() => closeOngoingTrade(p.id)}
-                      disabled={closingId === p.id}
-                      className="flex-1 py-2 bg-tertiary-container hover:bg-tertiary text-on-tertiary-container hover:text-on-tertiary rounded-lg text-xs font-bold transition-colors disabled:opacity-50 flex items-center justify-center"
+                      onClick={() => onClose(p)}
+                      disabled={closingId === p.id || sellingId === p.id || flight != null}
+                      className="flex-1 h-11 bg-tertiary-container hover:bg-tertiary text-on-tertiary-container hover:text-on-tertiary rounded-lg text-sm font-bold transition-colors disabled:opacity-50 flex items-center justify-center"
                     >
                       {closingId === p.id ? 'Closing…' : 'Close Position'}
                     </button>
                   </div>
+                  <Notice result={notices[p.id]} />
                 </div>
               );
             })}
           </div>
         </>
+      )}
+
+      {sheet?.kind === 'sell' && (
+        <SellQtySheet
+          key={`sell-${sheet.p.id}`}
+          p={positions.find((x) => x.id === sheet.p.id) ?? sheet.p}
+          mode={mode}
+          onSubmit={(qty) => sellQty(sheet.p.id, qty)}
+          onClose={() => setSheet(null)}
+        />
+      )}
+      {sheet?.kind === 'close' && (
+        <ClosePositionSheet
+          key={`close-${sheet.p.id}`}
+          p={positions.find((x) => x.id === sheet.p.id) ?? sheet.p}
+          mode={mode}
+          onSubmit={() => closeOngoingTrade(sheet.p.id)}
+          onClose={() => setSheet(null)}
+        />
       )}
     </div>
   );
