@@ -130,6 +130,13 @@ export interface MonitoredPosition {
   };
   ltp?: number;
   ws_scrip_key?: string | null;
+  /** Set when an exit of the whole holding has been requested and not yet acted on. */
+  force_exit?: string | null;
+  /** LIVE: a requested partial sell the engine has not placed yet (cleared once placed). */
+  manual_sell_qty?: number | null;
+  /** LIVE: a placed exit order (manual, target slice or stop) not yet settled at the broker. */
+  pending_exit_order_id?: string | null;
+  pending_exit_qty?: number;
 }
 
 export interface KotakForm {

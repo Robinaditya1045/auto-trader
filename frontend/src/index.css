@@ -88,3 +88,8 @@
   }
 }
 
+
+/* A bottom sheet rises from the edge on a phone; from md up it is a centred dialog. */
+@keyframes sheet-in { from { transform: translateY(100%); } to { transform: translateY(0); } }
+@media (max-width: 767px) { .sheet-in { animation: sheet-in 0.18s ease-out; } }
+@media (prefers-reduced-motion: reduce) { .sheet-in { animation: none; } }

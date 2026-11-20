@@ -7,7 +7,8 @@ export function LogTerminal({ serverBase, height = 220 }: { serverBase: string; 
   const [logs, setLogs] = useState<{ id: number, text: string, time: string, isError: boolean }[]>([]);
   const [filter, setFilter] = useState<'ALL' | 'ERROR'>('ALL');
   const [connected, setConnected] = useState(false);
-  const [isOpen, setIsOpen] = useState(true);
+  // On a phone the log would take ~40% of the screen under the positions, so it starts folded.
+  const [isOpen, setIsOpen] = useState(() => typeof window === 'undefined' || !window.matchMedia('(max-width: 767px)').matches);
   const bottomRef = useRef<HTMLDivElement>(null);
 
   // Auto-scroll on new log
@@ -79,37 +80,40 @@ export function LogTerminal({ serverBase, height = 220 }: { serverBase: string; 
   }, [serverBase]);
 
   return (
-    <div className="flex flex-col border-t border-outline-variant bg-surface-container-lowest transition-all duration-300" style={{ height: isOpen ? height : 37 }}>
+    <div className="flex flex-col border-t border-outline-variant bg-surface-container-lowest transition-all duration-300" style={{ height: isOpen ? height : undefined }}>
       {/* Header bar */}
-      <div className="flex items-center gap-2 bg-surface-container-low px-4 py-2 border-b border-outline-variant shrink-0">
+      <div className="flex items-center gap-2 bg-surface-container-low px-2 md:px-4 py-1 md:py-2 border-b border-outline-variant shrink-0 min-h-11 md:min-h-0 whitespace-nowrap">
         <button
           onClick={() => setIsOpen(!isOpen)}
-          className="text-on-surface-variant hover:text-on-surface transition-colors p-0.5 rounded hover:bg-surface-container"
+          aria-expanded={isOpen}
+          aria-label={isOpen ? 'Hide the engine log' : 'Show the engine log'}
+          className="flex items-center gap-2 text-on-surface-variant hover:text-on-surface transition-colors px-1 py-1.5 md:p-0.5 rounded hover:bg-surface-container min-w-0"
         >
           {isOpen ? <ChevronDown size={14} /> : <ChevronUp size={14} />}
+          <span className={`w-2 h-2 rounded-full shrink-0 ${connected ? 'bg-secondary' : 'bg-error'}`} />
+          {connected
+            ? <Wifi size={13} className="text-secondary shrink-0" />
+            : <WifiOff size={13} className="text-error shrink-0" />}
+          <span className="text-xs font-mono-code font-semibold truncate">
+            <span className="md:hidden">Engine log{connected ? '' : ' · offline'}</span>
+            <span className="hidden md:inline">Live Engine Log — /api/logs/stream</span>
+          </span>
         </button>
-        <div className={`w-2 h-2 rounded-full ${connected ? 'bg-secondary' : 'bg-error'}`} />
-        {connected
-          ? <Wifi size={13} className="text-secondary" />
-          : <WifiOff size={13} className="text-error" />}
-        <span className="text-xs text-on-surface-variant font-mono-code font-semibold">
-          Live Engine Log — /api/logs/stream
-        </span>
-        <div className="ml-4 flex gap-1 bg-surface rounded p-0.5 border border-outline-variant">
+        <div className="ml-1 md:ml-4 flex gap-1 bg-surface rounded p-0.5 border border-outline-variant shrink-0">
           <button
             onClick={() => setFilter('ALL')}
             className={`px-2 py-0.5 rounded text-[10px] uppercase font-bold transition-colors ${filter === 'ALL' ? 'bg-primary text-on-primary shadow-sm' : 'text-on-surface-variant hover:text-on-surface'}`}
-          >All Logs</button>
+          >All<span className="hidden md:inline"> Logs</span></button>
           <button
             onClick={() => setFilter('ERROR')}
             className={`px-2 py-0.5 rounded text-[10px] uppercase font-bold transition-colors ${filter === 'ERROR' ? 'bg-error text-on-error shadow-sm' : 'text-on-surface-variant hover:text-on-surface'}`}
-          >Error Logs</button>
+          >Error<span className="hidden md:inline"> Logs</span></button>
         </div>
         <button
           onClick={() => setLogs([])}
-          className="ml-auto text-xs text-on-surface-variant hover:text-on-surface transition-colors font-medium"
+          className="ml-auto text-xs text-on-surface-variant hover:text-on-surface transition-colors font-medium px-1 py-1.5 shrink-0"
         >
-          Clear UI Logs
+          Clear<span className="hidden md:inline"> UI Logs</span>
         </button>
         <button
           onClick={async () => {
@@ -124,7 +128,7 @@ export function LogTerminal({ serverBase, height = 220 }: { serverBase: string; 
               }
             }
           }}
-          className="ml-4 text-xs text-error hover:text-error/80 transition-colors font-semibold"
+          className="ml-2 md:ml-4 text-xs text-error hover:text-error/80 transition-colors font-semibold px-1 py-1.5 shrink-0"
         >
           Clear DB
         </button>
